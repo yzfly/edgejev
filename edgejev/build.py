@@ -8,9 +8,9 @@ import shutil
 import sys
 
 PRECISIONS = ("int8", "int8-pc", "int8-static", "mixed", "fp32")
-DEFAULT_MODELS = {"laya": "convaiinnovations/laya-multilingual",
-                  "kev": "jaredpalmer/kev-0.5b",
-                  "playjev": "OmniJev/PlayJev-0.8B"}
+def default_model(backend):
+    from . import backends
+    return backends.get(backend).extras.get("default_model")
 
 
 # ---------------------------------------------------------------- laya 导出
@@ -60,7 +60,7 @@ def _export_laya(model_id, subfolder, out_dir):
     if not os.path.exists(tok_json):
         sys.exit("这个 checkpoint 不是 fast tokenizer，导不出 tokenizer.json")
 
-    conf = {"backend": "laya", "model_name": cfg.get("model_name", "laya"),
+    conf = {"backend": "laya", "runtime": "onnx", "model_name": cfg.get("model_name", "laya"),
             "source_model": model_id, "max_len": cfg.get("max_len", 1024),
             "head_max_len": cfg.get("head_max_len", 256),
             "temperature": cfg.get("temperature", [1.0, 1.0, 1.0]),
@@ -228,7 +228,7 @@ def run(backend="laya", model=None, subfolder=None, out=None, precision="int8",
     except ImportError:
         sys.exit("缺少转换依赖，请先： pip install 'edgejev[build]'")
 
-    model = model or DEFAULT_MODELS[backend]
+    model = model or default_model(backend)
     os.makedirs(out, exist_ok=True)
     print("加载 %s（后端 %s）..." % (model, backend), flush=True)
     fp32_path, conf, tok_json, marker = EXPORTERS[backend](model, subfolder, out)

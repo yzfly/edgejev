@@ -1,11 +1,9 @@
-"""后处理：温度标定、熵置信度、按原语组装答案。各后端共用。"""
-import math
-from typing import Dict, List
+"""后处理：温度标定、读出归一化、按原语组装答案。各后端共用。"""
+from typing import Dict, List, Sequence
 
 import numpy as np
 
-QTYPE_NAMES = {0: "choice", 1: "score", 2: "noul"}
-QTYPES = {v: k for k, v in QTYPE_NAMES.items()}
+from .core.render import QTYPES, QTYPE_NAMES
 
 
 def softmax(z: np.ndarray) -> np.ndarray:
@@ -18,37 +16,40 @@ def temp_bucket(qtype: int, k: int) -> str:
     return "%s:%s" % (QTYPE_NAMES[int(qtype)], size)
 
 
-def confidence_from_probs(p: np.ndarray, k: int) -> float:
-    """归一化香农熵置信度：1 - H(p)/log(k)。k<2 时恒为 1。"""
-    if k < 2:
-        return 1.0
-    p = p[:k]
-    ent = -(p * np.log(np.clip(p, 1e-12, 1.0))).sum()
-    return float(np.clip(1.0 - ent / math.log(k), 0.0, 1.0))
+def vocab_slot_probs(last_logits: np.ndarray, slot_ids: Sequence[int], k: int):
+    """词表读出：全词表 softmax 后取 K 个字母槽再归一化。
+
+    同时返回 allowed_mass——全词表概率落在这 K 个槽上的份额。base 骨干上它通常在
+    1e-4 量级，低不代表出错；真正有判别力的是槽之间的相对排序。
+    """
+    z = last_logits.astype(np.float64)
+    full = np.exp(z - z.max())
+    full /= full.sum()
+    sel = full[list(slot_ids[:k])]
+    mass = float(sel.sum())
+    return (sel / max(sel.sum(), 1e-12)), mass
 
 
-def format_answer(q: Dict, p: np.ndarray, conf: float, act_prob=None) -> Dict:
-    """组装成与官方 /v1/systemone 同构的答案。"""
-    out = {}
+def format_answer(spec, q: Dict, p: np.ndarray, conf: float, act_prob=None) -> Dict:
+    extra = {}
     if act_prob is not None:
-        out["action"] = {"act_probability": round(float(act_prob), 4)}
+        extra["action"] = {"act_probability": round(float(act_prob), 4)}
     t = q["t"]
     if t == "choice":
-        keys = list(q["crit"].keys())
+        keys = spec.keys_of(q)
         return dict(type="choice", choice=keys[int(p.argmax())],
                     probabilities={k: round(float(v), 4) for k, v in zip(keys, p)},
-                    confidence=conf, **out)
+                    confidence=conf, **extra)
     if t == "score":
         return dict(type="score", score=round(float((np.arange(len(p)) * p).sum()), 4),
                     legend={str(i): c for i, c in enumerate(q["crit"])},
                     probabilities={str(i): round(float(v), 4) for i, v in enumerate(p)},
-                    confidence=conf, **out)
+                    confidence=conf, **extra)
     noul = float(p[1])
-    return dict(type="noul", noul=round(noul, 4),
-                confidence=round(max(noul, 1.0 - noul), 4), **out)
+    return dict(type="noul", noul=round(noul, 4), confidence=conf, **extra)
 
 
-def assemble(questions: List[Dict], qids: List[str], logits, act, ks,
+def assemble(spec, questions: List[Dict], qids: List[str], logits, act, ks,
              temperature, temperature_by_options) -> Dict:
     answers = {}
     for r, (qid, q) in enumerate(zip(qids, questions)):
@@ -56,18 +57,6 @@ def assemble(questions: List[Dict], qids: List[str], logits, act, ks,
         qt = QTYPES[q["t"]]
         scale = temperature_by_options.get(temp_bucket(qt, k), temperature[qt])
         p = softmax(logits[r, :k] / max(1e-3, float(scale)))
-        conf = round(confidence_from_probs(p, k), 4)
-        answers[qid] = format_answer(q, p, conf, None if act is None else act[r, 0])
+        conf = spec.confidence_of(q, p, k)
+        answers[qid] = format_answer(spec, q, p, conf, None if act is None else act[r, 0])
     return answers
-
-
-def to_internal(qdef: Dict) -> Dict:
-    import json
-    t = qdef["type"]
-    crit = qdef.get("criteria")
-    if t == "choice" and isinstance(crit, list):
-        crit = {c: None for c in crit}
-    ins = qdef["instructions"]
-    if not isinstance(ins, str):
-        ins = json.dumps(ins, ensure_ascii=False)
-    return {"t": t, "ins": ins, "crit": crit}

@@ -57,8 +57,21 @@ class TorchVLM:
         self.head_w32 = self.model.get_output_embeddings().weight.detach().float()
         self.note = "torch-vlm（%s, %s）" % (device, str(dtype).replace("torch.", ""))
 
-    def slot_ids(self, backend):
-        return backend.slot_ids(self.processor.tokenizer, self.template)
+    def letter_slots(self, prefix=" "):
+        """解析字母槽的 token id，校验每个都是单 token 且能往返。"""
+        from ..core.layout import LETTERS
+
+        tok = self.processor.tokenizer
+        ids = []
+        for letter in LETTERS:
+            text = prefix + letter
+            enc = tok.encode(text, add_special_tokens=False)
+            if len(enc) != 1 or tok.decode(enc) != text:
+                raise ValueError("字母槽 %r 在这个 tokenizer 下不是单个可往返的 token" % text)
+            ids.append(enc[0])
+        if len(set(ids)) != len(ids):
+            raise ValueError("字母槽 token 冲突")
+        return ids
 
     def last_logits(self, image, prompt) -> "Any":
         """返回最后一个位置的全词表 logits，float32 numpy。

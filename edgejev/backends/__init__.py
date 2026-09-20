@@ -1,13 +1,7 @@
-"""后端注册表。新增一个后端＝加一个模块并在这里登记。"""
-from . import laya, playjev
+"""后端注册表。一个后端就是一份 BackendSpec 声明，不是一份上游代码的搬运。"""
+from . import kev, laya, playjev
 
-_REGISTRY = {"laya": laya, "playjev": playjev}
-
-try:
-    from . import kev
-    _REGISTRY["kev"] = kev
-except Exception:      # kev 适配器是可选的
-    pass
+_REGISTRY = {m.SPEC.name: m.SPEC for m in (laya, kev, playjev)}
 
 
 def get(name):
@@ -18,3 +12,7 @@ def get(name):
 
 def names():
     return sorted(_REGISTRY)
+
+
+def specs():
+    return dict(_REGISTRY)

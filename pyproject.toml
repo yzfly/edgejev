@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edgejev"
-version = "0.1.0"
-description = "在自己的设备上跑 Jev 式的类型化决策：ONNX + INT8，运行时不需要 torch，支持 Linux / macOS / Windows"
+version = "0.2.0"
+description = "本地 CPU 上跑类型化决策模型：单题 15.6ms，比官方托管 API 快 20 倍；模型 324MB，运行时不依赖 torch"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
