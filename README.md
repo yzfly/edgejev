@@ -9,10 +9,31 @@ EdgeJev 把各家开源复现统一成「转换 → 量化 → 部署」一条�
 
 ## 安装
 
+还没发到 PyPI，从 GitHub 装：
+
 ```bash
-pip install edgejev                # 运行时：onnxruntime + tokenizers + numpy
-pip install 'edgejev[build]'       # 转换时额外需要 torch / transformers
+# uv（推荐，自己管虚拟环境）
+uv tool install "git+https://github.com/yzfly/edgejev"
+
+# 或装进项目的虚拟环境
+uv venv && uv pip install "git+https://github.com/yzfly/edgejev"
+
+# pipx
+pipx install "git+https://github.com/yzfly/edgejev"
+
+# 原生 venv（Debian/Ubuntu 直接 pip 会报 externally-managed-environment）
+python3 -m venv .venv && .venv/bin/pip install "git+https://github.com/yzfly/edgejev"
 ```
+
+可选依赖按需加，`uv pip install "edgejev[build] @ git+https://github.com/yzfly/edgejev"`：
+
+| extra | 用途 |
+| :-- | :-- |
+| `build` | `edgejev build` 转 ONNX，需要 torch / transformers / laya |
+| `vlm` | `playjev` 后端，需要 torch / torchvision / transformers / pillow |
+| `train` | `edgejev.train` 训练模块 |
+
+不加 extra 时运行时只有 onnxruntime + tokenizers + numpy。
 
 ## 用法
 
