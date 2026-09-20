@@ -52,6 +52,9 @@ class TorchVLM:
         self.device, self.torch, self.dtype = device, torch, dtype
         self.model = AutoModelForImageTextToText.from_pretrained(
             model_id, dtype=dtype, local_files_only=local).to(device).eval()
+        # 读出在 float32 上做：bf16 的 logit 在量级 25–50 时量化步长到 0.125，会让选项打平。
+        # 权重与嵌入是 tied 的，所以单独留一份 float32 副本，而不是把整个头重新转型。
+        self.head_w32 = self.model.get_output_embeddings().weight.detach().float()
         self.note = "torch-vlm（%s, %s）" % (device, str(dtype).replace("torch.", ""))
 
     def slot_ids(self, backend):
@@ -60,13 +63,21 @@ class TorchVLM:
     def last_logits(self, image, prompt) -> "Any":
         """返回最后一个位置的全词表 logits，float32 numpy。
 
-        上游特意在 float32 上读：bf16 在 logit 量级 25–50 时量化步长 0.125，会让选项打平。
+        走内层 `model.model` 再手算 logits，而不是 `ForConditionalGeneration` 的 `out.logits`——
+        后者在这个架构上出来的分布几乎是平的（全词表最大概率 1e-4，词表 25 万时均匀是 4e-6）。
         """
-        inputs = self.processor(text=[prompt], images=[image], return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        with self.torch.no_grad():
-            out = self.model(**inputs)
-        return out.logits[0, -1].float().cpu().numpy()
+        enc = self.processor(text=[prompt], images=[image], return_tensors="pt")
+        enc = {k: v.to(self.device) for k, v in enc.items() if hasattr(v, "to")}
+        self._ntok = int(enc["input_ids"].shape[-1])
+        with self.torch.inference_mode():
+            out = self.model.model(
+                input_ids=enc["input_ids"], attention_mask=enc["attention_mask"],
+                pixel_values=enc["pixel_values"], image_grid_thw=enc["image_grid_thw"],
+                mm_token_type_ids=enc.get("mm_token_type_ids"),
+                use_cache=False, return_dict=True)
+            h = out.last_hidden_state[:, -1, :].float()   # 左 padding，最后一个位置就是答案槽
+            logits = h @ self.head_w32.T
+        return logits[0].cpu().numpy()
 
     @property
     def n_input_tokens(self):

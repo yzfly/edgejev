@@ -22,12 +22,14 @@ runtime = "torch-vlm"
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 PROMPT_VERSION = "playjev-letters-v1"
+# 与上游逐字一致。上游注释说明：这段「冻结的 OpenJev 措辞」比
+# "You are a System One decision model" 那种开头高 3–6 个点，所以不要自己加前缀。
 SYSTEM_PROMPT = (
-    "You are a decision model. You are given a state and a question about it. "
     "Apply the question to the state. Choose exactly one of the listed options. "
     "Respond with only its uppercase letter, with no explanation or reasoning."
 )
-DEFAULT_INSTRUCTIONS = "Which action should be taken next?"
+DEFAULT_INSTRUCTIONS = "Which move should the player make next?"
+FRAME_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 PLAIN_ANSWER_CUE = "Answer:"
 
 
@@ -36,7 +38,7 @@ def options_block(options: Sequence[dict]) -> str:
         raise ValueError("%d 个选项超出 %d 个字母槽" % (len(options), len(LETTERS)))
     lines = []
     for letter, opt in zip(LETTERS, options):
-        desc = opt.get("desc")
+        desc = (opt.get("description") or "").strip()
         lines.append("%s. %s: %s" % (letter, opt["name"], desc) if desc
                      else "%s. %s" % (letter, opt["name"]))
     return "\n".join(lines)
@@ -49,7 +51,7 @@ def render_suffix(options, instructions=DEFAULT_INSTRUCTIONS) -> str:
 
 
 def render_state(n_placeholders: int) -> str:
-    return "State:\n" + "\n".join(["<|vision_start|><|image_pad|><|vision_end|>"] * n_placeholders)
+    return "<state>\n" + "\n".join([FRAME_PLACEHOLDER] * n_placeholders) + "\n</state>"
 
 
 def build_plain_prompt(options, instructions=DEFAULT_INSTRUCTIONS, n_placeholders=1) -> str:
@@ -99,11 +101,11 @@ def options_from_question(q: Dict) -> List[dict]:
     """把 EdgeJev 的带类型问题转成 PlayJev 的选项列表。"""
     t, crit = q["t"], q.get("crit")
     if t == "choice":
-        return [{"name": kk, "desc": vv if isinstance(vv, str) and vv else None}
+        return [{"name": kk, "description": vv if isinstance(vv, str) else None}
                 for kk, vv in crit.items()]
     if t == "score":
-        return [{"name": "level %d" % i, "desc": c if isinstance(c, str) else None}
+        return [{"name": "level %d" % i, "description": c if isinstance(c, str) else None}
                 for i, c in enumerate(crit)]
     crit = crit or {}
-    return [{"name": "false", "desc": crit.get("false") or "the statement does not hold"},
-            {"name": "true", "desc": crit.get("true") or "the statement holds"}]
+    return [{"name": "false", "description": crit.get("false") or "the statement does not hold"},
+            {"name": "true", "description": crit.get("true") or "the statement holds"}]

@@ -68,6 +68,25 @@ export TYPESAFE_API_KEY=local
 依赖 `causal_conv1d` / flash-linear-attention 的递归状态核，没有对应的 ONNX 算子。
 用这个后端只统一 API 和 `serve`，没有量化加速。
 
+```bash
+pip install 'edgejev[vlm]'
+edgejev build --backend playjev --out ./playjev      # 只落配置，不导 ONNX
+```
+
+```python
+ag = Agent("./playjev")
+ag.system_one("frame.png", {                          # state 传图片路径 / URL / bytes / PIL / ndarray
+    "move": {"type": "choice", "instructions": "Which move should the player make next?",
+             "criteria": {"left": "move the paddle left", "right": "move the paddle right",
+                          "stay": "keep the paddle still"}}})
+```
+
+4 vCPU CPU 上单次决策约 1.2 s（未装 `causal_conv1d` / `flash-linear-attention` 优化核，
+transformers 回退到参考实现）。返回里多一个 `allowed_mass`：全词表 softmax 落在 K 个字母槽上的质量。
+这个模型的基座是 base 而非 instruct，概率质量天然分散，`allowed_mass` 在 1e-4 量级属正常，
+有判别力的是字母之间的相对排序。实测五个游戏的缩略图，argmax 与分布形状各不相同，
+max(p) 与上游回放记录的真实对局分布（167 步，中位 0.827）落在同一区间。
+
 加后端＝在 `edgejev/backends/` 写一个模块并在注册表登记。
 
 ## 基准

@@ -89,7 +89,7 @@ class Agent:
             probs, allowed = self.backend.readout(logits, self.slots, len(opts))
             conf = round(self.backend.choice_confidence(probs), 4)
             a = post.format_answer(q, np.asarray(probs), conf, None)
-            a["allowed_mass"] = round(allowed, 4)
+            a["allowed_mass"] = round(allowed, 7)   # 量级在 1e-4，4 位精度会把不同输入显示成同一个数
             answers[qid] = a
         return {"model": self.model_name, "answers": answers,
                 "usage": {"input_tokens": 0, "output_tokens": 0}}
