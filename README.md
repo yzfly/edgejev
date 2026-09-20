@@ -9,31 +9,34 @@ EdgeJev 把各家开源复现统一成「转换 → 量化 → 部署」一条�
 
 ## 安装
 
-还没发到 PyPI，从 GitHub 装：
+用 [uv](https://docs.astral.sh/uv/)：
 
 ```bash
-# uv（推荐，自己管虚拟环境）
-uv tool install "git+https://github.com/yzfly/edgejev"
+# 装成全局命令，uv 自己管虚拟环境
+uv tool install edgejev
 
-# 或装进项目的虚拟环境
-uv venv && uv pip install "git+https://github.com/yzfly/edgejev"
+# 或加进当前项目
+uv add edgejev
 
-# pipx
-pipx install "git+https://github.com/yzfly/edgejev"
-
-# 原生 venv（Debian/Ubuntu 直接 pip 会报 externally-managed-environment）
-python3 -m venv .venv && .venv/bin/pip install "git+https://github.com/yzfly/edgejev"
+# 或临时跑一次，不装
+uvx --from edgejev edgejev info
 ```
 
-可选依赖按需加，`uv pip install "edgejev[build] @ git+https://github.com/yzfly/edgejev"`：
+不加 extra 时运行时只有 onnxruntime + tokenizers + numpy，不依赖 torch。按需加：
 
-| extra | 用途 |
-| :-- | :-- |
-| `build` | `edgejev build` 转 ONNX，需要 torch / transformers / laya |
-| `vlm` | `playjev` 后端，需要 torch / torchvision / transformers / pillow |
-| `train` | `edgejev.train` 训练模块 |
+```bash
+uv tool install "edgejev[build]"     # edgejev build 转 ONNX：torch / transformers / laya
+uv tool install "edgejev[vlm]"       # playjev 后端：torch / torchvision / transformers / pillow
+uv add "edgejev[train]"              # edgejev.train 训练模块
+```
 
-不加 extra 时运行时只有 onnxruntime + tokenizers + numpy。
+`uv tool install` 装的命令独立于项目环境；如果用 `uv add` 装进项目，跑的时候要带 `uv run`：
+
+```bash
+uv run edgejev info
+```
+
+没装 uv 的话：`curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ## 用法
 
@@ -90,7 +93,7 @@ export TYPESAFE_API_KEY=local
 用这个后端只统一 API 和 `serve`，没有量化加速。
 
 ```bash
-pip install 'edgejev[vlm]'
+uv tool install "edgejev[vlm]"
 edgejev build --backend playjev --out ./playjev      # 只落配置，不导 ONNX
 ```
 
