@@ -115,6 +115,9 @@ def quantize(src, dst, precision, decision_marker=None, calib=None):
     if precision == "int8-static":
         if calib is None:
             raise ValueError("静态量化需要标定数据")
+        print("  [实验性] int8-static 目前会大幅掉点：MinMax 标定下实测 AG News 25.8%"
+              "（随机基线 25%）、emotion 29.8%，且比动态量化慢约 4 倍。"
+              "它能做到批次无关，但标定方法还没调好——生产请用 int8 或 fp32。", flush=True)
         quantize_static(src, dst, calib, quant_format=QuantFormat.QDQ,
                         activation_type=QuantType.QInt8, weight_type=QuantType.QInt8,
                         per_channel=True, calibrate_method=CalibrationMethod.MinMax)
