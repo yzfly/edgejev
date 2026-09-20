@@ -1,7 +1,7 @@
 """后端注册表。新增一个后端＝加一个模块并在这里登记。"""
-from . import laya
+from . import laya, playjev
 
-_REGISTRY = {"laya": laya}
+_REGISTRY = {"laya": laya, "playjev": playjev}
 
 try:
     from . import kev

@@ -9,7 +9,8 @@ import sys
 
 PRECISIONS = ("int8", "int8-pc", "int8-static", "mixed", "fp32")
 DEFAULT_MODELS = {"laya": "convaiinnovations/laya-multilingual",
-                  "kev": "jaredpalmer/kev-0.5b"}
+                  "kev": "jaredpalmer/kev-0.5b",
+                  "playjev": "OmniJev/PlayJev-0.8B"}
 
 
 # ---------------------------------------------------------------- laya 导出
@@ -70,7 +71,24 @@ def _export_laya(model_id, subfolder, out_dir):
     return path, conf, tok_json, "type_emb.weight"
 
 
-EXPORTERS = {"laya": _export_laya}
+def _write_playjev(model_id, subfolder, out_dir):
+    """playjev 不导 ONNX：Qwen3.5 的线性注意力层没有对应的 ONNX 算子。
+
+    这里只落一份配置，运行时直接用 transformers 加载；EdgeJev 统一的是 API 和 serve。
+    """
+    from huggingface_hub import snapshot_download
+
+    local = os.path.exists(model_id)
+    if not local:
+        print("  预拉权重 ...", flush=True)
+        snapshot_download(model_id)
+    conf = {"backend": "playjev", "runtime": "torch-vlm", "template": "plain",
+            "model_name": "playjev", "source_model": model_id,
+            "temperature": [1.0, 1.0, 1.0], "temperature_by_options": {}}
+    return None, conf, None, None
+
+
+EXPORTERS = {"laya": _export_laya, "playjev": _write_playjev}
 
 
 # ------------------------------------------------------------------- 量化
@@ -214,6 +232,14 @@ def run(backend="laya", model=None, subfolder=None, out=None, precision="int8",
     os.makedirs(out, exist_ok=True)
     print("加载 %s（后端 %s）..." % (model, backend), flush=True)
     fp32_path, conf, tok_json, marker = EXPORTERS[backend](model, subfolder, out)
+
+    if fp32_path is None:          # 不走 ONNX 的后端（playjev）
+        with open(os.path.join(out, "edgejev.json"), "w", encoding="utf-8") as f:
+            json.dump(conf, f, ensure_ascii=False, indent=2)
+        print("  运行时 %s（不导 ONNX，无量化）" % conf["runtime"])
+        print("\n完成 -> %s" % out)
+        print('  from edgejev import Agent; Agent("%s").system_one(image, questions)' % out)
+        return
     print("  fp32 %.0f MB" % (os.path.getsize(fp32_path) / 1e6), flush=True)
 
     final = os.path.join(out, "model.onnx")
