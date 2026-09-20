@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edgejev"
+version = "0.1.0"
+description = "在自己的设备上跑 Jev 式的类型化决策：ONNX + INT8，运行时不需要 torch，支持 Linux / macOS / Windows"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "numpy>=1.20",
+    "huggingface_hub>=0.20",
+]
+
+[project.optional-dependencies]
+# 只有「把 HF checkpoint 转成 ONNX」这一步需要，转完就可以卸掉
+build = ["torch>=2.0", "transformers>=4.45", "safetensors>=0.4", "laya>=0.3.0", "onnxconverter-common>=1.14", "onnx>=1.15"]
+
+[project.scripts]
+edgejev = "edgejev.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["edgejev*"]

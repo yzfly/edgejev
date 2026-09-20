@@ -1,0 +1,9 @@
+.venv*/
+models/
+runs/
+__pycache__/
+*.egg-info/
+*.onnx
+*.onnx.data
+dist/
+build/
