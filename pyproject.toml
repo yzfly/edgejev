@@ -4,19 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edgejev"
-version = "0.3.1"
-description = "一台 4 核 CPU，单题 15.6 ms。把 laya / kev / PlayJev 等开源 Jev 复现转成 ONNX 并量化，本地跑类型化决策，运行时不依赖 torch"
+version = "0.3.2"
+description = "离线可用的本地类型化决策：4 核 CPU 单题 15.6ms。Local & offline Jev / System One inference on CPU with ONNX + INT8, no torch at runtime"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [{ name = "yzfly", email = "zphyix@gmail.com" }]
-keywords = ["jev", "system-one", "onnx", "quantization", "cpu-inference", "calibrated-probabilities"]
+keywords = [
+    "jev", "system-one", "typesafe-ai", "typed-decisions", "decision-model",
+    "offline", "offline-inference", "local-inference", "on-device", "edge-ai",
+    "cpu-inference", "onnx", "onnxruntime", "quantization", "int8",
+    "calibrated-probabilities", "laya", "kev", "air-gapped",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
 ]
 dependencies = [
     "onnxruntime>=1.17",

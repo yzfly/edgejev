@@ -2,12 +2,15 @@
 
 # EdgeJev
 
-### 在本地跑类型化决策模型
+### 离线可用的本地类型化决策模型
 
-**一台 4 核 CPU，单题 15.6 ms**
+Local &amp; offline Jev / System One inference on CPU
+
+**一台 4 核 CPU，单题 15.6 ms · 断网可用 · 运行时不依赖 torch**
 
 [![PyPI](https://img.shields.io/pypi/v/edgejev.svg)](https://pypi.org/project/edgejev/)
 [![Latency](https://img.shields.io/badge/CPU-15.6ms%2F题-brightgreen.svg)](#model-zoo)
+[![Offline](https://img.shields.io/badge/offline-100%25-success.svg)](#离线运行)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
@@ -15,7 +18,7 @@
 
 ---
 
-EdgeJev 把 [laya](https://github.com/NandhaKishorM/laya)、[kev](https://github.com/jaredpalmer/kev)、[PlayJev](https://github.com/OmniJev/PlayJev) 这些开源 Jev 复现统一成一条「转换 → 量化 → 部署」的路径，跑在普通 CPU 上。运行时只要 onnxruntime、tokenizers、numpy 三个包，不装 torch。
+EdgeJev 把 [laya](https://github.com/NandhaKishorM/laya)、[kev](https://github.com/jaredpalmer/kev)、[PlayJev](https://github.com/OmniJev/PlayJev) 这些开源 [Jev](https://typesafe.ai) / System One 复现统一成一条「转换 → 量化 → 部署」的路径：导出 ONNX、INT8 量化、起一个官方协议兼容的本地服务。跑在普通 CPU 上，**全程离线，不需要 API key、不需要联网、数据不出本机**。运行时只要 onnxruntime、tokenizers、numpy 三个包，不装 torch。
 
 一次类型化决策要多久（每格 8 ms）：
 
@@ -59,6 +62,23 @@ r["answers"]["anger"]["confidence"]     # 0.41
 ```
 
 转换那一步需要 torch，转完就可以卸掉。之后只装 `edgejev` 即可运行。
+
+## 离线运行
+
+转换那一步要从 Hugging Face 拉权重，之后全部离线：
+
+```bash
+edgejev build --backend laya --out ./jev-int8   # 唯一需要联网的一步
+# 把 ./jev-int8 拷到内网机器，之后：
+edgejev serve --model ./jev-int8 --port 8009
+```
+
+产出目录是自包含的三个文件——`model.onnx`、`tokenizer.json`、`edgejev.json`，
+拷走就能在没有外网的机器上跑。推理过程不发任何网络请求，没有遥测，没有 API key，
+state 和问题都不离开本机。
+
+适用于数据不能出内网的场景、air-gapped 环境、以及不想为每次决策付一个网络往返的实时链路。
+
 
 ## Model zoo
 
