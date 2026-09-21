@@ -190,7 +190,119 @@ def _export_kev(model_id, subfolder, out_dir):
     return path, conf, os.path.join(tmp, "tokenizer.json"), None
 
 
-EXPORTERS = {"laya": _export_laya, "playjev": _write_playjev, "kev": _export_kev}
+def _export_nanojev(model_id, subfolder, out_dir):
+    """Qwen3 + 标量打分头 + set attention -> 单个 ONNX 图。
+
+    checkpoint 是完整的 DecisionModel state_dict（best.safetensors），骨干只按
+    backbone_config 构造结构、不从 Hub 拉基座权重。set attention 手写成矩阵乘，
+    不走 nn.MultiheadAttention 的融合快路径，那条路径导不出图。
+    """
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch.export import Dim
+    from safetensors.torch import load_file
+    from transformers import AutoConfig, AutoModel, AutoTokenizer
+    from . import backends as _bk
+
+    spec = _bk.get("nanojev")
+    if os.path.exists(model_id):
+        ckpt = model_id
+    else:
+        from huggingface_hub import snapshot_download
+        ckpt = snapshot_download(
+            model_id, revision=spec.extras.get("default_revision"),
+            allow_patterns=["best.safetensors", "config.json", "tokenizer/*", "backbone_config/*"])
+    if subfolder:
+        ckpt = os.path.join(ckpt, subfolder)
+    with open(os.path.join(ckpt, "config.json"), encoding="utf-8") as f:
+        run_cfg = json.load(f)
+    set_head = run_cfg.get("set_head", "none")
+    print("  base %s | set_head=%s" % (run_cfg.get("model"), set_head), flush=True)
+
+    tok = AutoTokenizer.from_pretrained(os.path.join(ckpt, "tokenizer"))
+    body_cfg = AutoConfig.from_pretrained(os.path.join(ckpt, "backbone_config"))
+    body_cfg.use_cache = False
+    sd = load_file(os.path.join(ckpt, "best.safetensors"))
+    d = body_cfg.hidden_size
+    heads = 4
+
+    class NanoJevGraph(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = AutoModel.from_config(body_cfg, attn_implementation="eager").float()
+            self.norm = nn.LayerNorm(d)
+            self.scalar = nn.Linear(d, 1)
+            if set_head == "attention":
+                self.set_project = nn.Linear(d + 1, 128)
+                self.set_attention = nn.MultiheadAttention(128, heads, batch_first=True)
+                self.set_output = nn.Linear(128, 1)
+
+        def _set_delta(self, h, leaf_mask):
+            Q, K = leaf_mask.shape
+            log_k = leaf_mask.sum(-1, keepdim=True).to(h.dtype).log()[:, :, None].expand(-1, K, 1)
+            u = self.set_project(torch.cat([h, log_k], dim=-1))
+            a = self.set_attention
+            q, k, v = F.linear(u, a.in_proj_weight, a.in_proj_bias).chunk(3, dim=-1)
+            split = lambda x: x.reshape(Q, K, heads, -1).transpose(1, 2)
+            w = split(q) @ split(k).transpose(-1, -2) / (128 // heads) ** 0.5
+            w = w.masked_fill(~leaf_mask[:, None, None, :], -1e9).softmax(-1)
+            mixed = a.out_proj((w @ split(v)).transpose(1, 2).reshape(Q, K, 128))
+            return self.set_output(torch.tanh(u + mixed)).squeeze(-1)
+
+        def forward(self, input_ids, position_ids, attn_mask_4d, leaf_idx, leaf_mask, qtype):
+            h = self.backbone(input_ids=input_ids, position_ids=position_ids,
+                              attention_mask=attn_mask_4d, use_cache=False).last_hidden_state[0]
+            h = self.norm(h[leaf_idx])                     # [Q, K, d]
+            z = self.scalar(h).squeeze(-1)
+            if set_head == "attention":
+                z = z + self._set_delta(h, leaf_mask) * (qtype == 0)[:, None].to(z.dtype)
+            # noul 只有一条路径，logits 记作 [0, z]
+            noul = torch.cat([z[:, :1] * 0, z[:, :1], torch.full_like(z[:, 2:], -1e4)], dim=1)
+            return torch.where((qtype == 2)[:, None], noul, z.masked_fill(~leaf_mask, -1e4))
+
+    net = NanoJevGraph()
+    net.load_state_dict(sd, strict=True, assign=True)
+    del sd
+    net.eval()
+
+    from .core.layout import prefix_tree
+    from .tokenize import Encoder
+    eos = tok.eos_token_id
+    enc = Encoder(None, {"eos_id": eos})
+    enc.ids = enc.user_ids = lambda t: tok(t, add_special_tokens=False)["input_ids"]
+    cfg0 = {"max_len": spec.extras["max_len"]}
+    sample = prefix_tree(enc, "a short piece of state text",
+                         [{"t": "choice", "ins": "which team",
+                           "crit": {"a": "one", "b": "two", "c": "three"}},
+                          {"t": "noul", "ins": "is it urgent", "crit": None}],
+                         cfg0, **spec.layout_kw)
+    args = tuple(torch.from_numpy(sample.feed[n]) for n in spec.input_names)
+
+    path = os.path.join(out_dir, "_fp32.onnx")
+    L, Q, K = Dim("L", min=8, max=cfg0["max_len"]), Dim("Q", min=1, max=64), Dim("K", min=2, max=255)
+    torch.onnx.export(
+        net, args, path, input_names=spec.input_names, output_names=["logits"],
+        dynamic_shapes={"input_ids": {1: L}, "position_ids": {1: L},
+                        "attn_mask_4d": {2: L, 3: L},
+                        "leaf_idx": {0: Q, 1: K}, "leaf_mask": {0: Q, 1: K}, "qtype": {0: Q}},
+        opset_version=20, dynamo=True, external_data=True)
+    import onnx
+    m = onnx.load(path, load_external_data=False)    # 0.6B fp32 超过 2GB，权重留在 .data 里
+    del m.graph.value_info[:]
+    onnx.save(m, path)
+
+    tmp = os.path.join(out_dir, "_tok")
+    tok.save_pretrained(tmp)
+    conf = {"backend": "nanojev", "runtime": "onnx", "model_name": "nanojev",
+            "source_model": model_id, "base_model": run_cfg.get("model"),
+            "max_len": cfg0["max_len"], "eos_id": eos,
+            "temperature": [1.0, 1.0, 1.0], "temperature_by_options": {}}
+    return path, conf, os.path.join(tmp, "tokenizer.json"), None
+
+
+EXPORTERS = {"laya": _export_laya, "playjev": _write_playjev, "kev": _export_kev,
+             "nanojev": _export_nanojev}
 
 
 # ------------------------------------------------------------------- 量化
@@ -340,6 +452,29 @@ def _pack_two(ag, texts, q):
             "marker_mask": mm, "qtype": qt}
 
 
+def _onnx_bytes(path):
+    data = path + ".data"
+    return os.path.getsize(path) + (os.path.getsize(data) if os.path.exists(data) else 0)
+
+
+def _move_onnx(src, dst):
+    """搬 ONNX 文件。超过 2GB 的图权重在旁边的 .data 里，图里按文件名引用它，得一起改名。"""
+    data = src + ".data"
+    if not os.path.exists(data):
+        shutil.move(src, dst)
+        return
+    import onnx
+    m = onnx.load(src, load_external_data=False)
+    name = os.path.basename(dst) + ".data"
+    for t in m.graph.initializer:
+        for e in t.external_data:
+            if e.key == "location":
+                e.value = name
+    onnx.save(m, dst)
+    os.remove(src)
+    shutil.move(data, os.path.join(os.path.dirname(dst), name))
+
+
 def run(backend="laya", model=None, subfolder=None, out=None, precision=None,
         keep_fp32=False):
     if backend not in EXPORTERS:
@@ -366,11 +501,11 @@ def run(backend="laya", model=None, subfolder=None, out=None, precision=None,
         print("\n完成 -> %s" % out)
         print('  from edgejev import Agent; Agent("%s").system_one(image, questions)' % out)
         return
-    print("  fp32 %.0f MB" % (os.path.getsize(fp32_path) / 1e6), flush=True)
+    print("  fp32 %.0f MB" % (_onnx_bytes(fp32_path) / 1e6), flush=True)
 
     final = os.path.join(out, "model.onnx")
     if precision == "fp32":
-        shutil.move(fp32_path, final)
+        _move_onnx(fp32_path, final)
     else:
         print("量化 (%s) ..." % precision, flush=True)
         calib = None
@@ -391,7 +526,7 @@ def run(backend="laya", model=None, subfolder=None, out=None, precision=None,
             for extra in (fp32_path + ".data", fp32_path.replace(".onnx", "") + ".data"):
                 if os.path.exists(extra):
                     os.remove(extra)
-    print("  model.onnx %.0f MB" % (os.path.getsize(final) / 1e6), flush=True)
+    print("  model.onnx %.0f MB" % (_onnx_bytes(final) / 1e6), flush=True)
 
     shutil.copyfile(tok_json, os.path.join(out, "tokenizer.json"))
     shutil.rmtree(os.path.join(out, "_tok"), ignore_errors=True)

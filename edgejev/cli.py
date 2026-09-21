@@ -9,12 +9,12 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="把上游 checkpoint 转成 EdgeJev 目录")
-    b.add_argument("--backend", default="laya", help="laya | kev")
+    b.add_argument("--backend", default="laya", help="laya | kev | nanojev | playjev")
     b.add_argument("--model", default=None, help="HF 模型 id 或本地路径，默认按后端选")
     b.add_argument("--subfolder", default=None)
     b.add_argument("--out", required=True)
     b.add_argument("--precision", default=None,
-                   help="不给就用后端的默认值（laya=int8，kev/playjev=fp32）。"
+                   help="不给就用后端的默认值（laya=int8，kev/nanojev/playjev=fp32）。"
                         "可选 int8 | int8-pc | mixed | fp32")
     b.add_argument("--keep-fp32", action="store_true")
 

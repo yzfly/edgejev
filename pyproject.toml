@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edgejev"
-version = "0.3.2"
+version = "0.4.0"
 description = "离线可用的本地类型化决策：4 核 CPU 单题 15.6ms。Local & offline Jev / System One inference on CPU with ONNX + INT8, no torch at runtime"
 readme = "README.md"
 requires-python = ">=3.9"

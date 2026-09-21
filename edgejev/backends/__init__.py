@@ -1,7 +1,7 @@
 """后端注册表。一个后端就是一份 BackendSpec 声明，不是一份上游代码的搬运。"""
-from . import kev, laya, playjev
+from . import kev, laya, nanojev, playjev
 
-_REGISTRY = {m.SPEC.name: m.SPEC for m in (laya, kev, playjev)}
+_REGISTRY = {m.SPEC.name: m.SPEC for m in (laya, kev, nanojev, playjev)}
 
 
 def get(name):

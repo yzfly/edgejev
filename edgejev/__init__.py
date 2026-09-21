@@ -7,4 +7,4 @@
 from .agent import Agent, load
 
 __all__ = ["Agent", "load"]
-__version__ = "0.3.2"
+__version__ = "0.4.0"

@@ -18,7 +18,7 @@ Local &amp; offline Jev / System One inference on CPU
 
 ---
 
-EdgeJev 把 [laya](https://github.com/NandhaKishorM/laya)、[kev](https://github.com/jaredpalmer/kev)、[PlayJev](https://github.com/OmniJev/PlayJev) 这些开源 [Jev](https://typesafe.ai) / System One 复现统一成一条「转换 → 量化 → 部署」的路径：导出 ONNX、INT8 量化、起一个官方协议兼容的本地服务。跑在普通 CPU 上，**全程离线，不需要 API key、不需要联网、数据不出本机**。运行时只要 onnxruntime、tokenizers、numpy 三个包，不装 torch。
+EdgeJev 把 [laya](https://github.com/NandhaKishorM/laya)、[kev](https://github.com/jaredpalmer/kev)、[NanoJev](https://github.com/TianyuCodings/NanoJev)、[PlayJev](https://github.com/OmniJev/PlayJev) 这些开源 [Jev](https://typesafe.ai) / System One 复现统一成一条「转换 → 量化 → 部署」的路径：导出 ONNX、INT8 量化、起一个官方协议兼容的本地服务。跑在普通 CPU 上，**全程离线，不需要 API key、不需要联网、数据不出本机**。运行时只要 onnxruntime、tokenizers、numpy 三个包，不装 torch。
 
 一次类型化决策要多久（每格 8 ms）：
 
@@ -91,10 +91,16 @@ AG News 4 分类、dair-ai emotion 6 分类，各 400 条，batch=1。
 | laya | mmBERT-base 322M | int8 | 324 MB | 15.6 ms | 44.8 ms | 91.2% | 48.2% | 默认 |
 | kev | Qwen2.5-0.5B + LoRA | fp32 | 1978 MB | 44 ms | 131 ms | 90.0%¹ | 44.0%¹ | 默认 |
 | kev | Qwen2.5-0.5B + LoRA | int8 | 497 MB | 26 ms | 78 ms | 84.0%¹ | 21.0%¹ | `--precision int8` |
+| nanojev | Qwen3-0.6B + 标量头 | fp32 | 2389 MB | 155 ms | 253 ms | —² | —² | 默认 |
+| nanojev | Qwen3-0.6B + 标量头 | int8 | 600 MB | 69 ms | 148 ms | —² | —² | `--precision int8` |
 | playjev | Qwen3.5-0.8B VLM | fp32 | 2214 MB | 1.2 s | — | — | — | 默认 |
 
 ¹ kev 用 n=100 子集评测，与上面 n=400 的行不可直接比较。同一子集上 laya 的成绩是
 fp32 94.0% / 57.0%、int8 91.0% / 53.0%。
+
+² nanojev 发布的 checkpoint（`unified-games-v1`）只在 Maze / Snake / ViZDoom 四款游戏的决策上训练过，
+不是通用分类器：n=100 子集上 AG News 20.0%、emotion 18.0%，都在随机基线附近。它的用途是游戏策略，
+准确性用下面「与上游的一致性」里它自己的 dev 集来核对。
 
 同一份权重的横向参照：laya 自己公布的是 T4 GPU 上 32.8 ms、CPU 上 200–500 ms；
 官方 Jev 1.13 托管 API 实测中位 314 ms（含网络往返）。
@@ -118,6 +124,13 @@ kev 同样对拍过，参照是上游 `kev/model.py` 原文（`encode` / `branch
 两条路径从分词到读出全程独立，只共享权重。六个用例覆盖中英文、2/3/6 选项、长短 state、
 含 `opt_mask` padding 的情形：logits 最大偏差 7.15e-06、概率最大偏差 1.19e-06、argmax 零翻转。
 
+nanojev 分两层对拍。结构上，用随机初始化的小 Qwen3 对上游 `DecisionModel` 原文：上游每个候选独立跑一条
+因果路径，这里合并成一棵前缀树，choice（含 set attention）/ score / noul 的 logits 最大偏差 2.62e-06，
+而 token 数从 864 降到 185（八选项）。真实权重上，对的是上游随模型发布的 `predictions_dev.jsonl`
+（CUDA bf16）：Maze / Snake / ViZDoom 各 20 条，fp32 的 logits 最大偏差 0.029、概率最大偏差 0.0036、
+argmax 零翻转。state 不能截断——上游训练时不截断，实测截到 1024 token 会让两条长迷宫 state 的 argmax 翻转，
+所以这个后端超过 `max_len` 直接报错。
+
 playjev 后端没有上游数值可对，改用分布核对：五个游戏画面给出不同的 argmax 与分布形状，
 max(p) 落在上游公开回放的区间内（167 步真实对局，最小 0.604 / 中位 0.827 / 最大 1.000）。
 
@@ -139,10 +152,13 @@ max(p) 落在上游公开回放的区间内（167 步真实对局，最小 0.604
 
 几条实测结论：
 **不同后端的默认精度不一样。** `edgejev build` 不指定 `--precision` 时按后端取：laya 用 int8，
-kev 和 playjev 用 fp32。原因是读出头的结构不同——laya 的打分头是 LayerNorm → Linear → GELU → Linear，
+kev、nanojev 和 playjev 用 fp32。原因是读出头的结构不同——laya 的打分头是 LayerNorm → Linear → GELU → Linear，
 量化噪声被非线性吸收；kev 的 PointerHead 只有两个 Linear 做点积，噪声直接作用在选项排序上。
 实测 kev 量化后 AG News 掉 6 点、emotion 从 44.0% 掉到 21.0%（六分类随机基线 16.7%），
 选项越多塌得越狠。laya 同样量化只掉 3–4 点。
+nanojev 也默认 fp32：int8 快 2.1 倍（dev 集长 state 中位 1515 ms → 717 ms）、体积 600 MB，
+但对上游 logits 的偏差从 0.029 涨到 0.89，60 条里有 4 条 argmax 翻转——游戏策略的分布常常是两个动作接近五五开，
+经不起这个量级的噪声。
 
 
 **动态量化的结果依赖 batch。** 激活的量化 scale 在运行时按实际张量计算，padding 一变 scale 就变。
@@ -201,9 +217,10 @@ SPEC = BackendSpec(
 | :-- | :-- | :-- | :-- | :-- | :-- |
 | laya | 每题一行，`[MASK]` 标记位 | bidirectional | 打分头随模型进图 | ONNX | int8 |
 | kev | 多题打包一条序列 | block-causal + 选项隔离 | PointerHead | ONNX | fp32 |
+| nanojev | 前缀树，每个候选一片叶子 | block-causal + 候选隔离 | 标量头 + set attention | ONNX | fp32 |
 | playjev | 画面 + 字母清单 | causal | 词表字母槽 | torch | — |
 
-渲染、掩码、温度标定、置信度、答案组装都在 core 共用。`laya.py` 17 行、`kev.py` 20 行、`playjev.py` 32 行。
+渲染、掩码、温度标定、置信度、答案组装都在 core 共用。`laya.py` 18 行、`kev.py` 24 行、`nanojev.py` 26 行、`playjev.py` 30 行。
 
 playjev 走 torch 而不是 ONNX：Qwen3.5 的文本塔是混合线性注意力，`linear_attention` 层依赖
 causal_conv1d 和 flash-linear-attention 的递归状态核，没有对应的 ONNX 算子。
@@ -245,6 +262,7 @@ uvx --from edgejev edgejev info      # 或临时跑一次
 
 - [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya) — laya 后端的模型与渲染逻辑
 - [jaredpalmer/kev](https://github.com/jaredpalmer/kev) — kev 的打包布局、block-causal 掩码与 PointerHead
+- [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev) — nanojev 的候选路径格式、标量打分头与 set attention
 - [OmniJev/PlayJev](https://github.com/OmniJev/PlayJev) — playjev 的提示格式与字母槽读出
 - [jhu-clsp/mmBERT](https://huggingface.co/jhu-clsp/mmBERT-base) — laya 的编码器骨干
 - [TypeSafe AI](https://typesafe.ai) — Jev 与 `/v1/systemone` 协议

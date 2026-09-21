@@ -1,15 +1,17 @@
 """布局：把 (state, 带类型的问题) 摆成 token 序列，并标出每个选项的读出位置。
 
-三种布局覆盖了目前所有开源 Jev 复现：
+四种布局覆盖了目前所有开源 Jev 复现：
 
 * `per_question_row` —— 每题一条序列（batch 的一行），选项前插一个标记 token，
-  读该标记位的隐状态。编码器骨干走这条（laya、NanoJev、jevlike）。
+  读该标记位的隐状态。编码器骨干走这条（laya、jevlike）。
 * `packed_branches` —— 一条序列装下 state + 所有问题分支，靠 block-causal 掩码隔离，
   读每个选项结束符的隐状态、用 <decide> 位做 query。解码器骨干走这条（kev）。
+* `prefix_tree` —— 同样一条序列，但每个候选是一片互相隔离的叶子，读叶子末尾 EOS 的
+  隐状态，没有 <decide> 位。等价于上游「每个候选独立跑一条路径」，前缀只算一遍（NanoJev）。
 * `letter_prompt` —— 把选项渲染成 `A. 名字: 描述` 的文本清单，读最后一个位置在
   字母 token 上的分布。不需要训练专门的打分头，任何 base LM 都能用（PlayJev、OpenJev）。
 
-三者的产出统一成 `Encoded`：模型输入 + 每题选项数 + 读出位置。
+产出统一成 `Encoded`：模型输入 + 每题选项数 + 读出位置。
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -148,7 +150,83 @@ def packed_branches(enc, state, questions, cfg, *, render_kw=None):
         k=ks, input_tokens=L)
 
 
-LAYOUTS = {"per_question_row": per_question_row, "packed_branches": packed_branches}
+# ------------------------------------------------------------------ prefix tree
+def prefix_tree(enc, state, questions, cfg, *, render_kw=None,
+                state_template="State:\n%s\n",
+                question_template="Question type: %s\nQuestion:\n%s\n",
+                candidate_template="Candidate:\n%s\nDecision:",
+                type_names=None, noul_candidate="The proposition is true.",
+                noul_criterion_template="%s criterion: %s\n"):
+    """state -> 每题的问题段 -> 每个候选一条叶子路径，读叶子末尾 EOS 的隐状态。
+
+    上游（NanoJev）是每个候选单独跑一条 `state + 问题 + 候选 + EOS` 的因果序列，
+    state 有多少候选就重复算多少遍。这里把公共前缀只放一次：候选 span 之间互不可见、
+    position id 都从前缀末尾接着数，于是每片叶子看到的 token 和位置与独立路径完全一致，
+    结果相同而前缀只算一遍。各段分开 tokenize，与上游逐段 encode 的边界对齐。
+
+    score 的每个档位只渲染自己的描述，不带序号；noul 只有一条「命题为真」路径，
+    图里读成 logits [0, z]。
+    """
+    from .masks import OPT_NONE, block_causal
+    from .render import QTYPES, render_criterion
+
+    max_len = cfg.get("max_len", 8192)
+    names = type_names or {}
+
+    # state 不截断：上游训练时就不截断，实测截掉尾部会翻转 argmax。超长直接报错。
+    ids = enc.user_ids(state_template % serialize_state(state))
+    seg = [0] * len(ids)
+    pos = list(range(len(ids)))
+    opt = [OPT_NONE] * len(ids)
+    p0 = len(ids)
+    leaf_idx, ks = [], []
+
+    for qi, q in enumerate(questions, start=1):
+        t, crit = q["t"], q.get("crit")
+        head = question_template % (names.get(t, t), q["ins"])
+        if t == "choice":
+            texts = render_options(q, **(render_kw or {}))
+        elif t == "score":
+            texts = [render_criterion(c) for c in crit]
+        else:
+            texts = [noul_candidate]
+            for key, label in (("false", "False"), ("true", "True")):
+                if (crit or {}).get(key) not in (None, ""):
+                    head += noul_criterion_template % (label, render_criterion(crit[key]))
+        instr = enc.user_ids(head)
+        spans = [enc.user_ids(candidate_template % c) + [enc.eos_id] for c in texts]
+
+        p1 = p0 + len(instr)
+        ids += instr; seg += [qi] * len(instr); opt += [OPT_NONE] * len(instr)
+        pos += list(range(p0, p1))
+        leaves = []
+        for j, s_ in enumerate(spans):
+            ids += s_; seg += [qi] * len(s_); opt += [j] * len(s_)
+            pos += list(range(p1, p1 + len(s_)))
+            leaves.append(len(ids) - 1)
+        leaf_idx.append(leaves)
+        ks.append(2 if t == "noul" else len(texts))
+
+    L = len(ids)
+    if L > max_len:
+        raise ValueError("序列 %d token，超过 max_len=%d" % (L, max_len))
+    K = max(ks)
+    li = np.zeros((len(ks), K), dtype=np.int64)
+    lm = np.zeros((len(ks), K), dtype=bool)
+    for i, row in enumerate(leaf_idx):
+        li[i, :len(row)] = row
+        lm[i, :len(row)] = True
+    return Encoded(
+        feed={"input_ids": np.array([ids], dtype=np.int64),
+              "position_ids": np.array([pos], dtype=np.int64),
+              "attn_mask_4d": block_causal([seg], opts=[opt]).astype(np.float32),
+              "leaf_idx": li, "leaf_mask": lm,
+              "qtype": np.array([QTYPES[q["t"]] for q in questions], dtype=np.int64)},
+        k=ks, input_tokens=L)
+
+
+LAYOUTS = {"per_question_row": per_question_row, "packed_branches": packed_branches,
+           "prefix_tree": prefix_tree}
 
 
 # --------------------------------------------------------------- letter prompt
