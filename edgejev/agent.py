@@ -50,6 +50,7 @@ class Agent:
         ids_map = {k: self.cfg[k] for k in self.cfg if k.endswith("_id")}
         ids_map["mask_token"] = self.cfg.get("mask_token", "<mask>")
         self.enc = Encoder.from_file(os.path.join(model_dir, "tokenizer.json"), ids_map)
+        self.enc.special = self.cfg.get("special_ids", [])
 
         so = ort.SessionOptions()
         so.intra_op_num_threads = threads or (os.cpu_count() or 4)

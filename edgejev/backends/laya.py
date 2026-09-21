@@ -13,5 +13,6 @@ SPEC = BackendSpec(
     runtime="onnx",
     input_names=["input_ids", "attention_mask", "marker_pos", "marker_mask", "qtype"],
     extras={"default_model": "convaiinnovations/laya-multilingual",
-            "decision_marker": "type_emb.weight"},
+            "decision_marker": "type_emb.weight",
+            "default_precision": "int8"},
 )

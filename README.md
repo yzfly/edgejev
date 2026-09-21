@@ -53,8 +53,12 @@ AG News 4 分类、dair-ai emotion 6 分类，各 400 条，batch=1。
 | :-- | :-- | :-- | --: | --: | --: | --: | --: | :-- |
 | laya | mmBERT-base 322M | fp32 | 1290 MB | 32.1 ms | 84.1 ms | 92.8% | 54.0% | `--precision fp32` |
 | laya | mmBERT-base 322M | int8 | 324 MB | 15.6 ms | 44.8 ms | 91.2% | 48.2% | 默认 |
-| playjev | Qwen3.5-0.8B VLM | fp32 | 2214 MB | 1.2 s | — | — | — | `--backend playjev` |
-| kev | Qwen + LoRA 0.5B–8B | — | — | — | — | — | — | 导出器开发中 |
+| kev | Qwen2.5-0.5B + LoRA | fp32 | 1978 MB | 44 ms | 131 ms | 90.0%¹ | 44.0%¹ | 默认 |
+| kev | Qwen2.5-0.5B + LoRA | int8 | 497 MB | 26 ms | 78 ms | 84.0%¹ | 21.0%¹ | `--precision int8` |
+| playjev | Qwen3.5-0.8B VLM | fp32 | 2214 MB | 1.2 s | — | — | — | 默认 |
+
+¹ kev 用 n=100 子集评测，与上面 n=400 的行不可直接比较。同一子集上 laya 的成绩是
+fp32 94.0% / 57.0%、int8 91.0% / 53.0%。
 
 同一份权重的横向参照：laya 自己公布的是 T4 GPU 上 32.8 ms、CPU 上 200–500 ms；
 官方 Jev 1.13 托管 API 实测中位 314 ms（含网络往返）。
@@ -73,6 +77,10 @@ laya 的 README 声称 DAIR Emotion 0.595 对 Jev 0.480，这个方向在上表�
 | 概率 | 0.00000 |
 | 置信度 | 0.000000 |
 | input_tokens | 完全相同 |
+
+kev 同样对拍过，参照是上游 `kev/model.py` 原文（`encode` / `branch_mask_batch` / `PointerHead`），
+两条路径从分词到读出全程独立，只共享权重。六个用例覆盖中英文、2/3/6 选项、长短 state、
+含 `opt_mask` padding 的情形：logits 最大偏差 7.15e-06、概率最大偏差 1.19e-06、argmax 零翻转。
 
 playjev 后端没有上游数值可对，改用分布核对：五个游戏画面给出不同的 argmax 与分布形状，
 max(p) 落在上游公开回放的区间内（167 步真实对局，最小 0.604 / 中位 0.827 / 最大 1.000）。
@@ -94,6 +102,12 @@ max(p) 落在上游公开回放的区间内（167 步真实对局，最小 0.604
 | int8-static | 326 MB | 195 ms | 25.8% | 29.8% | 不可用，见下 |
 
 几条实测结论：
+**不同后端的默认精度不一样。** `edgejev build` 不指定 `--precision` 时按后端取：laya 用 int8，
+kev 和 playjev 用 fp32。原因是读出头的结构不同——laya 的打分头是 LayerNorm → Linear → GELU → Linear，
+量化噪声被非线性吸收；kev 的 PointerHead 只有两个 Linear 做点积，噪声直接作用在选项排序上。
+实测 kev 量化后 AG News 掉 6 点、emotion 从 44.0% 掉到 21.0%（六分类随机基线 16.7%），
+选项越多塌得越狠。laya 同样量化只掉 3–4 点。
+
 
 **动态量化的结果依赖 batch。** 激活的量化 scale 在运行时按实际张量计算，padding 一变 scale 就变。
 同一条输入单独跑和跟别人一批跑，logits 最大差 2.43；fp32 ONNX 同样对比是 0.000。
@@ -147,11 +161,11 @@ SPEC = BackendSpec(
 )
 ```
 
-| 后端 | 布局 | 注意力 | 读出 | 运行时 |
-| :-- | :-- | :-- | :-- | :-- |
-| laya | 每题一行，`[MASK]` 标记位 | bidirectional | 打分头随模型进图 | ONNX |
-| kev | 多题打包一条序列 | block-causal + 选项隔离 | PointerHead | ONNX |
-| playjev | 画面 + 字母清单 | causal | 词表字母槽 | torch |
+| 后端 | 布局 | 注意力 | 读出 | 运行时 | 默认精度 |
+| :-- | :-- | :-- | :-- | :-- | :-- |
+| laya | 每题一行，`[MASK]` 标记位 | bidirectional | 打分头随模型进图 | ONNX | int8 |
+| kev | 多题打包一条序列 | block-causal + 选项隔离 | PointerHead | ONNX | fp32 |
+| playjev | 画面 + 字母清单 | causal | 词表字母槽 | torch | — |
 
 渲染、掩码、温度标定、置信度、答案组装都在 core 共用。`laya.py` 17 行、`kev.py` 20 行、`playjev.py` 32 行。
 

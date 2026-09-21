@@ -25,5 +25,6 @@ SPEC = BackendSpec(
     layout_kw={"system": SYSTEM_PROMPT, "frame_placeholder": FRAME_PLACEHOLDER,
                "instructions_default": "Which move should the player make next?",
                "answer_cue": "Answer:", "slot_prefix": " "},
-    extras={"default_model": "OmniJev/PlayJev-0.8B", "template": "plain"},
+    extras={"default_model": "OmniJev/PlayJev-0.8B", "template": "plain",
+            "default_precision": "fp32"},
 )

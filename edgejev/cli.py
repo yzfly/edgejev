@@ -13,8 +13,9 @@ def main(argv=None):
     b.add_argument("--model", default=None, help="HF 模型 id 或本地路径，默认按后端选")
     b.add_argument("--subfolder", default=None)
     b.add_argument("--out", required=True)
-    b.add_argument("--precision", default="int8",
-                   help="int8=per-tensor（默认，实测最快）| int8-pc | mixed | fp32")
+    b.add_argument("--precision", default=None,
+                   help="不给就用后端的默认值（laya=int8，kev/playjev=fp32）。"
+                        "可选 int8 | int8-pc | mixed | fp32")
     b.add_argument("--keep-fp32", action="store_true")
 
     s = sub.add_parser("serve", help="起一个官方协议兼容的 /v1/systemone")

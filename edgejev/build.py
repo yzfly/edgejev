@@ -88,7 +88,109 @@ def _write_playjev(model_id, subfolder, out_dir):
     return None, conf, None, None
 
 
-EXPORTERS = {"laya": _export_laya, "playjev": _write_playjev}
+
+
+# ----------------------------------------------------------------- kev 导出
+def _export_kev(model_id, subfolder, out_dir):
+    """Qwen + LoRA + PointerHead -> 单个 ONNX 图。
+
+    checkpoint 里只有 LoRA adapter 和 head.pt，骨干要从 adapter_config 指的 base 拉。
+    LoRA 在导出前合并进基座权重，PointerHead 一起进图，于是运行时不需要 peft。
+    """
+    import math
+    import torch
+    import torch.nn as nn
+    from torch.export import Dim
+    from huggingface_hub import snapshot_download
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    local = os.path.exists(model_id)
+    ckpt = model_id if local else snapshot_download(model_id)
+    meta = torch.load(os.path.join(ckpt, "head.pt"), map_location="cpu", weights_only=False)
+    base, lora_r = meta["base"], meta.get("lora", 16)
+    print("  base %s | LoRA r=%d" % (base, lora_r), flush=True)
+
+    tok = AutoTokenizer.from_pretrained(ckpt)
+    lm = AutoModelForCausalLM.from_pretrained(base, dtype=torch.float32,
+                                              attn_implementation="eager").model
+    try:
+        from peft import PeftModel
+    except ImportError:
+        sys.exit("kev 需要 peft： uv tool install \"edgejev[build]\"")
+    lm = PeftModel.from_pretrained(lm, ckpt).merge_and_unload()
+    lm.eval()
+    print("  LoRA 已合并", flush=True)
+
+    d = lm.config.hidden_size
+    hsd = meta["head"]
+    dp = hsd["q.weight"].shape[0]
+
+    class KevGraph(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm = lm
+            self.q = nn.Linear(d, dp)
+            self.k = nn.Linear(d, dp)
+            self.q.load_state_dict({"weight": hsd["q.weight"], "bias": hsd["q.bias"]})
+            self.k.load_state_dict({"weight": hsd["k.weight"], "bias": hsd["k.bias"]})
+            self.scale = 1.0 / math.sqrt(dp)
+
+        def forward(self, input_ids, position_ids, attn_mask_4d,
+                    decide_idx, opt_idx, opt_mask):
+            h = self.lm(input_ids=input_ids, position_ids=position_ids,
+                        attention_mask=attn_mask_4d, use_cache=False).last_hidden_state[0]
+            qv = self.q(h[decide_idx])                    # [Q, dp]
+            kv = self.k(h[opt_idx])                       # [Q, K, dp]
+            logits = (kv * qv[:, None, :]).sum(-1) * self.scale
+            return logits.masked_fill(~opt_mask, -1e4)
+
+    net = KevGraph().eval()
+
+    # 造一个示例输入：两题，选项数不同
+    from .core.layout import packed_branches
+    from .tokenize import Encoder
+    sp = [tok.convert_tokens_to_ids(t) for t in
+          ["<|fim_prefix|>", "<|fim_middle|>", "<|box_start|>", "<|box_end|>", "<|fim_suffix|>"]]
+    enc = Encoder(None, {"pad_id": tok.pad_token_id or 0})
+    enc.tok = tok.backend_tokenizer if hasattr(tok, "backend_tokenizer") else None
+    enc.ids = lambda t: tok(t, add_special_tokens=False)["input_ids"]
+    enc.special = sp
+    cfg0 = {"max_state": 384, "max_branch": 1024, "option_isolation": True}
+    sample = packed_branches(enc, "a short piece of state text",
+                             [{"t": "choice", "ins": "which team",
+                               "crit": {"a": "one", "b": "two", "c": "three"}},
+                              {"t": "noul", "ins": "is it urgent", "crit": None}], cfg0)
+    args = tuple(torch.from_numpy(sample.feed[n]) for n in
+                 ["input_ids", "position_ids", "attn_mask_4d", "decide_idx", "opt_idx", "opt_mask"])
+
+    path = os.path.join(out_dir, "_fp32.onnx")
+    L, Q, K = Dim("L", min=8, max=2048), Dim("Q", min=1, max=64), Dim("K", min=2, max=255)
+    torch.onnx.export(
+        net, args, path,
+        input_names=["input_ids", "position_ids", "attn_mask_4d",
+                     "decide_idx", "opt_idx", "opt_mask"],
+        output_names=["logits"],
+        dynamic_shapes={"input_ids": {1: L}, "position_ids": {1: L},
+                        "attn_mask_4d": {2: L, 3: L},
+                        "decide_idx": {0: Q}, "opt_idx": {0: Q, 1: K},
+                        "opt_mask": {0: Q, 1: K}},
+        opset_version=20, dynamo=True, external_data=False)
+    import onnx
+    m = onnx.load(path)
+    del m.graph.value_info[:]
+    onnx.save(m, path)
+
+    tmp = os.path.join(out_dir, "_tok")
+    tok.save_pretrained(tmp)
+    conf = {"backend": "kev", "runtime": "onnx", "model_name": "kev",
+            "source_model": model_id, "base_model": base,
+            "max_state": 384, "max_branch": 1024, "option_isolation": True,
+            "special_ids": sp, "pad_id": tok.pad_token_id or 0,
+            "temperature": [1.0, 1.0, 1.0], "temperature_by_options": {}}
+    return path, conf, os.path.join(tmp, "tokenizer.json"), None
+
+
+EXPORTERS = {"laya": _export_laya, "playjev": _write_playjev, "kev": _export_kev}
 
 
 # ------------------------------------------------------------------- 量化
@@ -188,38 +290,57 @@ def verify(out_dir):
             ok = False
             print("  [失败] %s: %s" % (name, str(e)[:160]))
 
-    # 批次无关性：同一条输入单独跑和跟别人一批跑，结果应该一致。
-    # 动态量化做不到这一点（激活 scale 随 padding 变），所以这里只警告不失败。
+    # 批次无关性只对「每题一行」这类会 padding 的布局有意义；
+    # packed_branches 永远是单序列，不存在同批互相影响。
+    if ag.spec.layout != "per_question_row":
+        return ok
+
     import numpy as np
-    from .backends import laya as _laya
     q = {"t": "noul", "ins": "is this urgent", "crit": None}
     texts = ["short one", "a considerably longer piece of state text " * 8]
     solo = []
     for t in texts:
-        p = _laya.prepare(ag.enc, t, [q], ag.cfg)
-        solo.append(ag.sess.run(None, p["feed"])[0][0, :2].copy())
-    items = [_laya.build_sequence(ag.enc, t, q, ag.cfg["max_len"], ag.cfg["head_max_len"])
-             for t in texts]
-    L = max(len(s_) for s_, _ in items)
-    ids = np.full((2, L), ag.enc.pad_id, dtype=np.int64)
-    att = np.zeros((2, L), dtype=np.int64)
-    mp = np.zeros((2, 2), dtype=np.int64); mm = np.zeros((2, 2), dtype=bool)
-    for i, (s_, m_) in enumerate(items):
-        ids[i, :len(s_)] = s_; att[i, :len(s_)] = 1
-        mp[i, :len(m_)] = m_; mm[i, :len(m_)] = True
-    lgb = ag.sess.run(None, {"input_ids": ids, "attention_mask": att, "marker_pos": mp,
-                             "marker_mask": mm, "qtype": np.full(2, 2, dtype=np.int64)})[0]
+        p_ = ag.spec.prepare(ag.enc, t, [q], ag.cfg)
+        solo.append(ag.sess.run(None, p_.feed)[0][0, :2].copy())
+    both = ag.spec.prepare(ag.enc, texts[0], [q], ag.cfg)   # 仅为拿到字段名
+    packed = _pack_two(ag, texts, q)
+    lgb = ag.sess.run(None, packed)[0]
     drift = max(float(np.abs(lgb[i, :2] - solo[i]).max()) for i in range(2))
     if drift < 1e-3:
-        print("  [OK] 批次无关性（单条与批量一致，漂移 %.1e）" % drift)
+        print("  [OK] 批次无关性（漂移 %.1e）" % drift)
     else:
         print("  [注意] 批次会影响结果：logits 漂移 %.2f。动态量化按实际张量算激活 scale，"
-              "padding 一变 scale 就变。要可复现请用 --precision int8-static 或 fp32，"
-              "或者固定 batch=1。" % drift)
+              "padding 一变 scale 就变。要可复现请固定 batch=1 或用 --precision fp32。" % drift)
     return ok
 
 
-def run(backend="laya", model=None, subfolder=None, out=None, precision="int8",
+
+def _pack_two(ag, texts, q):
+    """把两条不同长度的输入打进一个 batch，用于批次无关性检查。"""
+    import numpy as np
+
+    rows = [ag.spec.prepare(ag.enc, t, [q], ag.cfg).feed for t in texts]
+    L = max(r["input_ids"].shape[1] for r in rows)
+    K = max(r["marker_pos"].shape[1] for r in rows)
+    n = len(rows)
+    ids = np.full((n, L), ag.enc.pad_id, dtype=np.int64)
+    att = np.zeros((n, L), dtype=np.int64)
+    mp = np.zeros((n, K), dtype=np.int64)
+    mm = np.zeros((n, K), dtype=bool)
+    qt = np.zeros(n, dtype=np.int64)
+    for i, r in enumerate(rows):
+        l_ = r["input_ids"].shape[1]
+        k_ = r["marker_pos"].shape[1]
+        ids[i, :l_] = r["input_ids"][0]
+        att[i, :l_] = r["attention_mask"][0]
+        mp[i, :k_] = r["marker_pos"][0]
+        mm[i, :k_] = r["marker_mask"][0]
+        qt[i] = r["qtype"][0]
+    return {"input_ids": ids, "attention_mask": att, "marker_pos": mp,
+            "marker_mask": mm, "qtype": qt}
+
+
+def run(backend="laya", model=None, subfolder=None, out=None, precision=None,
         keep_fp32=False):
     if backend not in EXPORTERS:
         sys.exit("后端 %r 还没有构建器，目前支持：%s" % (backend, ", ".join(EXPORTERS)))
@@ -228,6 +349,11 @@ def run(backend="laya", model=None, subfolder=None, out=None, precision="int8",
     except ImportError:
         sys.exit("缺少转换依赖，请先： pip install 'edgejev[build]'")
 
+    from . import backends as _bk
+    spec = _bk.get(backend)
+    if precision is None:
+        precision = spec.extras.get("default_precision", "int8")
+        print("  后端 %s 的默认精度：%s" % (backend, precision), flush=True)
     model = model or default_model(backend)
     os.makedirs(out, exist_ok=True)
     print("加载 %s（后端 %s）..." % (model, backend), flush=True)
@@ -261,6 +387,10 @@ def run(backend="laya", model=None, subfolder=None, out=None, precision="int8",
             print("  决策路径保持 fp32 的节点：%d 个" % len(excl))
         if not keep_fp32:
             os.remove(fp32_path)
+            # 超过 2GB 的图 protobuf 装不下，导出器会另写一个 .data，一并清掉
+            for extra in (fp32_path + ".data", fp32_path.replace(".onnx", "") + ".data"):
+                if os.path.exists(extra):
+                    os.remove(extra)
     print("  model.onnx %.0f MB" % (os.path.getsize(final) / 1e6), flush=True)
 
     shutil.copyfile(tok_json, os.path.join(out, "tokenizer.json"))

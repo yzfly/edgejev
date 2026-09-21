@@ -16,5 +16,9 @@ SPEC = BackendSpec(
     extras={"default_model": "jaredpalmer/kev-0.5b",
             "special_tokens": ["<|fim_prefix|>", "<|fim_middle|>", "<|box_start|>",
                                "<|box_end|>", "<|fim_suffix|>"],
-            "max_state": 384, "max_branch": 1024, "option_isolation": True},
+            "max_state": 384, "max_branch": 1024, "option_isolation": True,
+            # PointerHead 是两个 Linear 做点积，中间没有非线性吸收量化噪声，
+            # 噪声直接作用在选项排序上。实测 int8 在 emotion(6 选项) 上从 44% 掉到 21%
+            # （随机基线 16.7%），所以这个后端默认不量化。
+            "default_precision": "fp32"},
 )
