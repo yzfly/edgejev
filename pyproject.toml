@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "edgejev"
-version = "0.3.0"
-description = "本地 CPU 上跑类型化决策模型：单题 15.6ms，比官方托管 API 快 20 倍；模型 324MB，运行时不依赖 torch"
+version = "0.3.1"
+description = "一台 4 核 CPU，单题 15.6 ms。把 laya / kev / PlayJev 等开源 Jev 复现转成 ONNX 并量化，本地跑类型化决策，运行时不依赖 torch"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }

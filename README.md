@@ -4,9 +4,10 @@
 
 ### 在本地跑类型化决策模型
 
-把开源 Jev 复现转成 ONNX，量化，部署到 CPU
+**一台 4 核 CPU，单题 15.6 ms**
 
 [![PyPI](https://img.shields.io/pypi/v/edgejev.svg)](https://pypi.org/project/edgejev/)
+[![Latency](https://img.shields.io/badge/CPU-15.6ms%2F题-brightgreen.svg)](#model-zoo)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
@@ -14,7 +15,22 @@
 
 ---
 
-EdgeJev 把 [laya](https://github.com/NandhaKishorM/laya)、[kev](https://github.com/jaredpalmer/kev)、[PlayJev](https://github.com/OmniJev/PlayJev) 这些开源 Jev 复现统一成一条「转换 → 量化 → 部署」的路径。跑在普通 CPU 上，一台 4 vCPU 的机器单题 15.6 ms；运行时只要 onnxruntime、tokenizers、numpy 三个包，不装 torch。
+EdgeJev 把 [laya](https://github.com/NandhaKishorM/laya)、[kev](https://github.com/jaredpalmer/kev)、[PlayJev](https://github.com/OmniJev/PlayJev) 这些开源 Jev 复现统一成一条「转换 → 量化 → 部署」的路径，跑在普通 CPU 上。运行时只要 onnxruntime、tokenizers、numpy 三个包，不装 torch。
+
+一次类型化决策要多久（每格 8 ms）：
+
+```
+官方 Jev 托管 API   ████████████████████████████████████████  314 ms
+laya 原项目 · CPU   █████████████████████████·····            200–500 ms
+laya 原项目 · T4    ████                                       32.8 ms
+EdgeJev · 4 核 CPU  ██                                         15.6 ms
+```
+
+跑的是 laya 同一份权重，没有换更小的模型。省下来的是网络往返，加上 ONNX Runtime 图优化（1.7x）
+和 INT8 走 AVX512-VNNI 整数乘加（1.2x）。模型同时从 1290 MB 缩到 324 MB。
+
+15.6 ms 的意义在于它够小。语音对话留给决策层的预算是 50–150 ms，一轮还往往要问好几个问题；
+三题打成一次请求是 44.8 ms，仍在预算内。
 
 ## Quick start
 
