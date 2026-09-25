@@ -35,7 +35,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # 只有「把 HF checkpoint 转成 ONNX」这一步需要，转完就可以卸掉
-build = ["torch>=2.0", "transformers>=4.45", "safetensors>=0.4", "laya>=0.3.0", "onnxconverter-common>=1.14", "onnx>=1.15", "peft>=0.10"]
+# onnxscript 是 torch>=2.6 的 dynamo 导出器（dynamo=True）的硬依赖，torch 不会自动装
+build = ["torch>=2.0", "transformers>=4.45", "safetensors>=0.4", "laya>=0.3.0", "onnxconverter-common>=1.14", "onnx>=1.17", "onnxscript>=0.1", "peft>=0.10"]
 # playjev 后端走 torch 运行时（Qwen3.5 的线性注意力层导不出 ONNX）
 vlm = ["torch>=2.0", "torchvision", "transformers>=4.45", "pillow", "accelerate"]
 # 训练
