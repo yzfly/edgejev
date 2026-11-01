@@ -14,8 +14,19 @@ def default_model(backend):
 
 
 # ---------------------------------------------------------------- laya 导出
+def _require_onnxscript():
+    """torch>=2.6 的 dynamo 导出器（dynamo=True）必须装 onnxscript，torch 不会自动带。"""
+    try:
+        import onnxscript  # noqa: F401
+    except ImportError:
+        sys.exit("ONNX 导出需要 onnxscript（torch dynamo 导出器的依赖）：\n"
+                 "    pip install 'edgejev[build]'\n"
+                 "只补这一个包也行：pip install onnxscript")
+
+
 def _export_laya(model_id, subfolder, out_dir):
     """返回 (fp32_onnx_path, cfg_dict, tokenizer_json_path, decision_node_cut)。"""
+    _require_onnxscript()
     import torch
     from torch.export import Dim
     import laya
@@ -97,6 +108,7 @@ def _export_kev(model_id, subfolder, out_dir):
     checkpoint 里只有 LoRA adapter 和 head.pt，骨干要从 adapter_config 指的 base 拉。
     LoRA 在导出前合并进基座权重，PointerHead 一起进图，于是运行时不需要 peft。
     """
+    _require_onnxscript()
     import math
     import torch
     import torch.nn as nn
@@ -197,6 +209,7 @@ def _export_nanojev(model_id, subfolder, out_dir):
     backbone_config 构造结构、不从 Hub 拉基座权重。set attention 手写成矩阵乘，
     不走 nn.MultiheadAttention 的融合快路径，那条路径导不出图。
     """
+    _require_onnxscript()
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
